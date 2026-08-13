@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+/* ── Base reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  background-color: #030712; /* gray-950 */
+  color: #f9fafb;            /* gray-50 */
+  min-height: 100dvh;
+}
+
+/* Prevent flash of unstyled routes */
+#root {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
