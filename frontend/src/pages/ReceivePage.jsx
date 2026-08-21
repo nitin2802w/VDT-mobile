@@ -121,6 +121,7 @@ export default function ReceivePage() {
     setFilename('')
     setErrorMsg('')
     setScanned(0)
+    setSaveMsg('')
   }
 
 
@@ -272,7 +273,7 @@ export default function ReceivePage() {
         {phase === DONE && (
           <div className="flex flex-col items-center gap-6 text-center max-w-sm">
             <div className="text-6xl">🎉</div>
-                      <div>
+          <div>
               <h2 className="text-xl font-semibold mb-2">File saved!</h2>
               <p className="text-gray-400 text-sm">
                 {filename} transferred and verified successfully.
