@@ -25,6 +25,7 @@
 
 import { useEffect, useRef, useCallback } from 'react'
 import jsQR from 'jsqr'
+import { Capacitor } from '@capacitor/core'
 
 const SCAN_INTERVAL_MS = 100  // max 10 scans/s — plenty for a 30fps QR stream
 
@@ -73,6 +74,18 @@ export default function CameraCapture({ onDecode, active = true }) {
 
     async function startCamera() {
       try {
+        // Android requires an explicit runtime permission request BEFORE
+        // getUserMedia — declaring CAMERA in the manifest alone isn't enough.
+        // This is a no-op in a plain browser (Capacitor.isNativePlatform() = false).
+        if (Capacitor.isNativePlatform()) {
+          const { Camera } = await import('@capacitor/camera')
+          const perm = await Camera.requestPermissions({ permissions: ['camera'] })
+          if (perm.camera !== 'granted') {
+            console.error('Camera permission denied by user')
+            return
+          }
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
           audio: false,
@@ -87,7 +100,7 @@ export default function CameraCapture({ onDecode, active = true }) {
 
         rafRef.current = requestAnimationFrame(scan)
       } catch (err) {
-        if (!cancelled) console.error('Camera access failed:', err)
+        if (!cancelled) console.error('Camera access failed:', err.name, err.message)
       }
     }
 
