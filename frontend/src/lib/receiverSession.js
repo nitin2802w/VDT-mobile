@@ -139,6 +139,11 @@ export class ReceiverSession {
     return this._decoder?.isComplete ?? false
   }
 
+  /** Total blocks expected — available once metadata has been received. */
+  get totalBlocks() {
+    return this._meta?.k ?? 0
+  }
+
   /** Current state string — useful for UI debugging. */
   get state() {
     return this._state

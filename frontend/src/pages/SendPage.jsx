@@ -1,180 +1,159 @@
 /**
- * SendPage.jsx — Phase F3
+ * SendPage.jsx — Phase O4 (Offline)
  *
  * State machine:
- *   idle       → user sees file drop zone, no WebSocket open
- *   uploading  → POST /api/upload in flight
- *   streaming  → upload done, WebSocket open, QR codes flashing
- *   paused     → user hit pause; WebSocket open but server stopped sending
- *   error      → any unrecoverable failure
+ *   idle      → file drop zone
+ *   encoding  → file.arrayBuffer() + SenderSession.create() in flight
+ *   streaming → session running, QR frames flashing
+ *   paused    → session paused, QR dimmed
+ *   error     → any failure
  *
- * Symbol flow:
- *   openSenderSocket.onSymbol fires → convert base64 payload to Uint8Array
- *   → store as currentSymbol state → QRRenderer re-renders the canvas.
- *   The server already paces symbols at the requested FPS; we do NOT need
- *   a client-side timer — just render whatever arrives.
- *
- * Cleanup:
- *   socketRef.current.stop() is called in a useEffect cleanup so the
- *   WebSocket closes if the user navigates away mid-stream.
+ * The backend and WebSocket are gone. All encoding happens locally via
+ * SenderSession. QRRenderer receives raw Uint8Array frame bytes directly —
+ * no seed/payload splitting, no re-encode.
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { uploadFile, openSenderSocket } from '../lib/api'
+import { SenderSession } from '../lib/senderSession'
 import QRRenderer from '../components/QRRenderer'
 
 // ── constants ─────────────────────────────────────────────────────────────────
-const MIN_FPS = 1
-const MAX_FPS = 30
+const MIN_FPS     = 1
+const MAX_FPS     = 30
 const DEFAULT_FPS = 10
+const BLOCK_SIZE  = 400
 
-// ── state machine values ──────────────────────────────────────────────────────
+// ── state machine ─────────────────────────────────────────────────────────────
 const IDLE      = 'idle'
-const UPLOADING = 'uploading'
+const ENCODING  = 'encoding'
 const STREAMING = 'streaming'
 const PAUSED    = 'paused'
 const ERROR     = 'error'
 
 export default function SendPage() {
-  const [phase, setPhase]               = useState(IDLE)
-  const [fps, setFps]                   = useState(DEFAULT_FPS)
-  const [meta, setMeta]                 = useState(null)     // upload response
-  const [currentSymbol, setCurrentSymbol] = useState(null)  // { seed, payload (Uint8Array), crc }
-  const [errorMsg, setErrorMsg]         = useState('')
-  const [symbolCount, setSymbolCount]   = useState(0)
+  const [phase,         setPhase]         = useState(IDLE)
+  const [fps,           setFps]           = useState(DEFAULT_FPS)
+  const [fileInfo,      setFileInfo]      = useState(null)   // { name, sizeKb, k }
+  const [currentFrame,  setCurrentFrame]  = useState(null)   // Uint8Array | null
+  const [frameCount,    setFrameCount]    = useState(0)
+  const [errorMsg,      setErrorMsg]      = useState('')
 
-  const socketRef  = useRef(null)   // SenderSocket control object
-  const fileRef    = useRef(null)   // hidden <input type="file"> ref
-  const dragActive = useRef(false)
+  const sessionRef = useRef(null)
+  const fileRef    = useRef(null)
 
-  // ── cleanup on unmount / navigation ──────────────────────────────────────────
+  // ── cleanup on unmount ────────────────────────────────────────────────────────
   useEffect(() => {
-    return () => {
-      socketRef.current?.stop()
-    }
+    return () => sessionRef.current?.stop()
   }, [])
 
   // ── helpers ───────────────────────────────────────────────────────────────────
 
   function enterError(msg) {
-    socketRef.current?.stop()
-    socketRef.current = null
+    sessionRef.current?.stop()
+    sessionRef.current = null
     setPhase(ERROR)
     setErrorMsg(msg)
   }
 
-  function decodeSymbolPayload(b64) {
-    return Uint8Array.from(atob(b64), c => c.charCodeAt(0))
+  function reset() {
+    sessionRef.current?.stop()
+    sessionRef.current = null
+    setPhase(IDLE)
+    setFileInfo(null)
+    setCurrentFrame(null)
+    setFrameCount(0)
+    setErrorMsg('')
   }
 
-  // ── upload + socket open ──────────────────────────────────────────────────────
+  // ── file handling ─────────────────────────────────────────────────────────────
 
   const handleFile = useCallback(async (file) => {
     if (!file) return
-    setPhase(UPLOADING)
-    setMeta(null)
-    setCurrentSymbol(null)
-    setSymbolCount(0)
-    socketRef.current?.stop()
-    socketRef.current = null
+    reset()
+    setPhase(ENCODING)
 
     try {
-      const uploadMeta = await uploadFile(file)
-      setMeta(uploadMeta)
+      const bytes   = new Uint8Array(await file.arrayBuffer())
+      const session = await SenderSession.create(file.name, bytes, BLOCK_SIZE)
+      sessionRef.current = session
 
-      // Open sender WebSocket and immediately start streaming
-      const socket = openSenderSocket(
-        // onSymbol — convert base64 payload to Uint8Array and push to renderer
-        (msg) => {
-          const payload = decodeSymbolPayload(msg.payload)
-          setCurrentSymbol({ seed: msg.seed, payload, crc: msg.crc })
-          setSymbolCount(n => n + 1)
-        },
-        // onWaiting — server has no transfer? Shouldn't happen here but handle gracefully
-        () => {
-          // Server may briefly send 'waiting' before registering our upload — ignore
-        },
-        // onError
-        (msg) => enterError(msg.detail ?? 'WebSocket error from sender')
-      )
+      // Expose file stats for the header bar.
+      // k is encoded inside the metadata frame; read it from the encoder.
+      setFileInfo({
+        name:   file.name,
+        sizeKb: (bytes.length / 1024).toFixed(1),
+        k:      session._encoder.k,
+      })
 
-      socketRef.current = socket
+      // onFrame: called on every tick with the next ready-to-render Uint8Array.
+      // Data frames and metadata frames both arrive here identically.
+      const onFrame = (frameBytes) => {
+        setCurrentFrame(frameBytes)
+        setFrameCount(n => n + 1)
+      }
+
+      session.start(onFrame, DEFAULT_FPS)
       setPhase(STREAMING)
-      socket.start(fps)
 
     } catch (err) {
-      enterError(err.message ?? 'Upload failed')
+      enterError(err.message ?? 'Failed to encode file')
     }
-  }, [fps])
+  }, [])
 
   // ── drag-and-drop ─────────────────────────────────────────────────────────────
 
   function onDrop(e) {
     e.preventDefault()
-    dragActive.current = false
-    const file = e.dataTransfer.files?.[0]
-    if (file) handleFile(file)
+    handleFile(e.dataTransfer.files?.[0])
   }
 
-  function onDragOver(e) {
-    e.preventDefault()
-    dragActive.current = true
-  }
+  function onDragOver(e) { e.preventDefault() }
 
   // ── play / pause ──────────────────────────────────────────────────────────────
 
   function togglePlay() {
     if (phase === STREAMING) {
-      socketRef.current?.pause()
+      sessionRef.current?.pause()
       setPhase(PAUSED)
     } else if (phase === PAUSED) {
-      socketRef.current?.start(fps)
+      // start() is idempotent — does NOT reset seed counter or interleave position.
+      sessionRef.current?.start(
+        (frameBytes) => { setCurrentFrame(frameBytes); setFrameCount(n => n + 1) },
+        fps
+      )
       setPhase(STREAMING)
     }
   }
 
-  // ── fps slider change ─────────────────────────────────────────────────────────
+  // ── fps slider ────────────────────────────────────────────────────────────────
 
   function onFpsChange(e) {
     const newFps = Number(e.target.value)
     setFps(newFps)
-    if (phase === STREAMING) {
-      // Re-send start with new fps to update server pacing
-      socketRef.current?.start(newFps)
-    }
-  }
-
-  // ── reset to idle ─────────────────────────────────────────────────────────────
-
-  function reset() {
-    socketRef.current?.stop()
-    socketRef.current = null
-    setPhase(IDLE)
-    setMeta(null)
-    setCurrentSymbol(null)
-    setSymbolCount(0)
-    setErrorMsg('')
+    // setFps adjusts the interval in-place — no stop/restart needed.
+    sessionRef.current?.setFps(newFps)
   }
 
   // ── render ────────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col">
+
       {/* ── top bar ── */}
       <header className="flex items-center gap-4 px-6 py-4 border-b border-gray-800">
         <Link to="/" className="text-gray-400 hover:text-white transition-colors text-sm">
           ← Back
         </Link>
         <h1 className="text-lg font-semibold">Send a File</h1>
-        {meta && (
+        {fileInfo && (
           <span className="ml-auto text-xs text-gray-500 truncate max-w-xs">
-            {meta.filename} · {(meta.file_size / 1024).toFixed(1)} KB · {meta.k} blocks
+            {fileInfo.name} · {fileInfo.sizeKb} KB · {fileInfo.k} blocks
           </span>
         )}
       </header>
 
-      {/* ── main content ── */}
+      {/* ── main ── */}
       <main className="flex-1 flex flex-col items-center justify-center gap-8 px-4 py-8">
 
         {/* ── IDLE: drop zone ── */}
@@ -182,7 +161,6 @@ export default function SendPage() {
           <div
             onDrop={onDrop}
             onDragOver={onDragOver}
-            onDragLeave={() => { dragActive.current = false }}
             onClick={() => fileRef.current?.click()}
             className="w-full max-w-md border-2 border-dashed border-gray-700 hover:border-indigo-500 rounded-3xl p-16 flex flex-col items-center gap-4 cursor-pointer transition-colors duration-200 group"
           >
@@ -190,7 +168,7 @@ export default function SendPage() {
             <p className="text-gray-300 text-center font-medium group-hover:text-white transition-colors">
               Drop a file here, or click to browse
             </p>
-            <p className="text-gray-600 text-sm">Max 10 MB</p>
+            <p className="text-gray-600 text-sm">Any file · Transferred via QR codes</p>
             <input
               ref={fileRef}
               type="file"
@@ -201,11 +179,11 @@ export default function SendPage() {
           </div>
         )}
 
-        {/* ── UPLOADING: spinner ── */}
-        {phase === UPLOADING && (
+        {/* ── ENCODING: spinner ── */}
+        {phase === ENCODING && (
           <div className="flex flex-col items-center gap-4">
             <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            <p className="text-gray-400">Uploading…</p>
+            <p className="text-gray-400">Encoding…</p>
           </div>
         )}
 
@@ -213,23 +191,22 @@ export default function SendPage() {
         {(phase === STREAMING || phase === PAUSED) && (
           <div className="flex flex-col items-center gap-6 w-full max-w-sm">
 
-            {/* QR canvas */}
+            {/* QR canvas — receives raw frame bytes, renders both data + metadata */}
             <div className={`rounded-2xl overflow-hidden shadow-2xl transition-opacity duration-200 ${phase === PAUSED ? 'opacity-40' : 'opacity-100'}`}>
               <QRRenderer
-                seed={currentSymbol?.seed}
-                payload={currentSymbol?.payload}
+                frameBytes={currentFrame}
                 size={280}
                 ecLevel="M"
               />
             </div>
 
-            {/* Stats bar */}
+            {/* Stats */}
             <div className="flex gap-6 text-sm text-gray-400">
-              <span>Symbols sent: <strong className="text-white">{symbolCount}</strong></span>
+              <span>Frames sent: <strong className="text-white">{frameCount}</strong></span>
               <span>FPS: <strong className="text-white">{fps}</strong></span>
             </div>
 
-            {/* Play / Pause button */}
+            {/* Play / Pause */}
             <button
               id="btn-playpause"
               onClick={togglePlay}
@@ -260,13 +237,12 @@ export default function SendPage() {
               />
             </div>
 
-            {/* Upload a different file */}
             <button
               id="btn-new-file"
               onClick={reset}
               className="text-sm text-gray-500 hover:text-gray-300 transition-colors underline"
             >
-              Upload a different file
+              Choose a different file
             </button>
           </div>
         )}
