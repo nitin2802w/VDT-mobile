@@ -1,5 +1,5 @@
 /**
- * ReceivePage.jsx — Phase O4 (Offline)
+ * ReceivePage.jsx — Phase O6 (Native Filesystem)
  *
  * State machine:
  *   idle     → "Start Scanning" button
@@ -24,9 +24,62 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { Capacitor } from '@capacitor/core'
+import { Filesystem, Directory } from '@capacitor/filesystem'
 import { ReceiverSession } from '../lib/receiverSession'
 import CameraCapture from '../components/CameraCapture'
 import ProgressBar   from '../components/ProgressBar'
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Convert Uint8Array → base64 string.
+ * @capacitor/filesystem writeFile requires base64 data, not raw bytes.
+ */
+function uint8ToBase64(bytes) {
+  let binary = ''
+  // Process in chunks to avoid call-stack overflow on large files.
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
+}
+
+/**
+ * saveFile(bytes, filename)
+ *
+ * On Android (Capacitor native context): writes the bytes to Documents/
+ * using @capacitor/filesystem so the file actually lands on disk.
+ *
+ * In a browser (desktop testing): falls back to the standard Blob/anchor
+ * click, which triggers the browser's native Save dialog.
+ *
+ * @param {Uint8Array} bytes
+ * @param {string} filename
+ * @returns {Promise<string>} Human-readable save location message.
+ */
+async function saveFile(bytes, filename) {
+  if (Capacitor.isNativePlatform()) {
+    const base64 = uint8ToBase64(bytes)
+    await Filesystem.writeFile({
+      path: filename,
+      data: base64,
+      directory: Directory.Documents,
+      recursive: false,
+    })
+    return `Saved to Documents/${filename}`
+  } else {
+    // Browser fallback for desktop testing.
+    const url = URL.createObjectURL(new Blob([bytes]))
+    const a   = document.createElement('a')
+    a.href     = url
+    a.download = filename
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+    return `Downloaded as ${filename}`
+  }
+}
 
 // ── state machine ─────────────────────────────────────────────────────────────
 const IDLE     = 'idle'
@@ -41,6 +94,7 @@ export default function ReceivePage() {
   const [filename, setFilename] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [scanned,  setScanned]  = useState(0)
+  const [saveMsg,  setSaveMsg]  = useState('')  // where the file was saved
 
   const sessionRef = useRef(null)
   const phaseRef   = useRef(IDLE)   // mirror for callbacks that close over stale phase
@@ -69,14 +123,6 @@ export default function ReceivePage() {
     setScanned(0)
   }
 
-  function saveBlobAs(blob, name) {
-    const url = URL.createObjectURL(blob)
-    const a   = document.createElement('a')
-    a.href     = url
-    a.download = name
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 2000)
-  }
 
   // ── start scanning ────────────────────────────────────────────────────────────
 
@@ -92,7 +138,7 @@ export default function ReceivePage() {
     if (phase !== COMPLETE) return
     let cancelled = false
 
-    sessionRef.current.getResult().then(result => {
+    sessionRef.current.getResult().then(async result => {
       if (cancelled) return
 
       if (!result) {
@@ -102,8 +148,14 @@ export default function ReceivePage() {
         return
       }
 
-      saveBlobAs(new Blob([result.bytes]), result.filename)
-      setPhase(DONE)
+      try {
+        const msg = await saveFile(result.bytes, result.filename)
+        setSaveMsg(msg)
+        setPhase(DONE)
+      } catch (err) {
+        // Native filesystem write failed (e.g. storage permission denied).
+        enterError(`Could not save file: ${err.message ?? err}`)
+      }
     })
 
     return () => { cancelled = true }
@@ -220,11 +272,14 @@ export default function ReceivePage() {
         {phase === DONE && (
           <div className="flex flex-col items-center gap-6 text-center max-w-sm">
             <div className="text-6xl">🎉</div>
-            <div>
+                      <div>
               <h2 className="text-xl font-semibold mb-2">File saved!</h2>
               <p className="text-gray-400 text-sm">
-                {filename} was transferred and verified successfully.
+                {filename} transferred and verified successfully.
               </p>
+              {saveMsg && (
+                <p className="text-emerald-400 text-xs mt-2 font-mono">{saveMsg}</p>
+              )}
             </div>
             <button
               id="btn-receive-another"
