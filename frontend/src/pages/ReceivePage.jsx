@@ -89,12 +89,13 @@ const DONE     = 'done'       // verified + saved
 const ERROR    = 'error'
 
 export default function ReceivePage() {
-  const [phase,    setPhase]    = useState(IDLE)
-  const [progress, setProgress] = useState({ known: 0, total: 0 })
-  const [filename, setFilename] = useState('')
-  const [errorMsg, setErrorMsg] = useState('')
-  const [scanned,  setScanned]  = useState(0)
-  const [saveMsg,  setSaveMsg]  = useState('')  // where the file was saved
+  const [phase,      setPhase]      = useState(IDLE)
+  const [progress,   setProgress]   = useState({ known: 0, total: 0 })
+  const [filename,   setFilename]   = useState('')
+  const [errorMsg,   setErrorMsg]   = useState('')
+  const [scanned,    setScanned]    = useState(0)
+  const [saveMsg,    setSaveMsg]    = useState('')
+  const [scanStatus, setScanStatus] = useState('idle')  // 'idle' | 'scanning' | 'found'
 
   const sessionRef = useRef(null)
   const phaseRef   = useRef(IDLE)   // mirror for callbacks that close over stale phase
@@ -241,14 +242,33 @@ export default function ReceivePage() {
         {/* ── SCANNING ── */}
         {phase === SCANNING && (
           <div className="flex flex-col items-center gap-5 w-full max-w-sm">
-            <CameraCapture onDecode={onDecode} active={true} />
+            <CameraCapture
+              onDecode={onDecode}
+              onStatus={setScanStatus}
+              onError={enterError}
+              active={true}
+            />
 
             <ProgressBar known={progress.known} total={progress.total} />
 
-            <div className="flex gap-6 text-sm text-gray-400">
+            <div className="flex gap-6 text-sm text-gray-400 flex-wrap justify-center">
               <span>QR decoded: <strong className="text-white">{scanned}</strong></span>
               <span>Blocks: <strong className="text-white">{progress.known}/{progress.total}</strong></span>
               <span className="text-emerald-400 font-semibold">{pct}%</span>
+            </div>
+
+            {/* Live scan status — shows if jsQR is finding codes or just looking */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className={`w-2 h-2 rounded-full ${
+                scanStatus === 'found'   ? 'bg-emerald-400 animate-ping' :
+                scanStatus === 'scanning' ? 'bg-yellow-400' :
+                'bg-gray-600'
+              }`} />
+              <span className="text-gray-500">
+                {scanStatus === 'found'    ? 'QR code detected' :
+                 scanStatus === 'scanning' ? 'Looking for QR code…' :
+                 'Camera starting…'}
+              </span>
             </div>
 
             <button

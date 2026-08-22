@@ -7,6 +7,10 @@
  *
  * Props:
  *   onDecode  {(Uint8Array) => void}  called on every successful QR decode
+ *   onStatus  {(string) => void}      optional — called on every scan attempt
+ *                                     with 'found' or 'scanning', useful for
+ *                                     debugging camera decode rate on device
+ *   onError   {(string) => void}      optional — called if camera access fails
  *   active    {boolean}               when false, scan loop is suspended
  *                                     (video feed stays visible)
  *
@@ -27,9 +31,9 @@ import { useEffect, useRef, useCallback } from 'react'
 import jsQR from 'jsqr'
 import { Capacitor } from '@capacitor/core'
 
-const SCAN_INTERVAL_MS = 100  // max 10 scans/s — plenty for a 30fps QR stream
+const SCAN_INTERVAL_MS = 50  // 20 scans/s — better decode rate on real devices
 
-export default function CameraCapture({ onDecode, active = true }) {
+export default function CameraCapture({ onDecode, onStatus, onError, active = true }) {
   const videoRef    = useRef(null)
   const canvasRef   = useRef(null)
   const streamRef   = useRef(null)  // MediaStream, for cleanup
@@ -63,8 +67,11 @@ export default function CameraCapture({ onDecode, active = true }) {
       inversionAttempts: 'dontInvert',  // binary data is never inverted
     })
 
-    if (result?.binaryData) {
+    if (result?.binaryData?.length > 0) {
+      onStatus?.('found')
       onDecode(new Uint8Array(result.binaryData))
+    } else {
+      onStatus?.('scanning')
     }
   }, [onDecode])
 
@@ -100,7 +107,13 @@ export default function CameraCapture({ onDecode, active = true }) {
 
         rafRef.current = requestAnimationFrame(scan)
       } catch (err) {
-        if (!cancelled) console.error('Camera access failed:', err.name, err.message)
+        if (!cancelled) {
+          const msg = err.name === 'NotAllowedError'
+            ? 'Camera permission denied'
+            : `Camera failed: ${err.name}`
+          console.error('Camera access failed:', err.name, err.message)
+          onError?.(msg)
+        }
       }
     }
 
